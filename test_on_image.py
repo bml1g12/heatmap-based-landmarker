@@ -15,6 +15,7 @@ from models.heatmapmodel import HeatMapLandmarker, \
     heatmap2sigmoidheatmap, mean_topk_activation
 from datasets.dataLAPA106 import LAPA106DataSet
 from torchvision import transforms
+from retinaface import RetinaFace
 
 THRESH_OCCLUDED = 0.5
 
@@ -22,6 +23,7 @@ THRESH_OCCLUDED = 0.5
 TRANSFORM = transforms.Compose([transforms.ToTensor(),
                                 transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                                      std=[0.229, 0.224, 0.225])])
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def square_box(box, ori_shape):
@@ -67,7 +69,7 @@ def concat_gt_heatmap(heat):
     return heat
 
 
-def apply_to_image(detector, img):
+def apply_to_image(detector, model, img):
     # Get box detector and then make it square
     faces = detector.predict(img)
     if len(faces) != 0:
@@ -75,74 +77,60 @@ def apply_to_image(detector, img):
         box = square_box(box, img.shape)
         box = list(map(int, box))
         x1, y1, x2, y2 = box
-
         # Inference lmks
         crop_face = img[y1:y2, x1:x2]
         crop_face = cv2.resize(crop_face, (256, 256))
         img_tensor = TRANSFORM(crop_face)
         img_tensor = torch.unsqueeze(img_tensor, 0)  # 1x3x256x256
-
-        heatmapPRED, lmks = model(img_tensor.to(device))
-        # heatmapPRED = heatmap2topkheatmap(heatmapPRED.to('cpu'))[0]
-        # print(type(heatmapPRED))
-        # heatmapPRED = heatmapPRED.view(1 , 106, -1)
-        # score = torch.max(heatmapPRED, dim=-1)
-        # print(f"HeatmapPRED shape :{heatmapPRED.shape}")
-
-        # heatmapPRED = heatmap2sigmoidheatmap(heatmapPRED)
-        # print(f"HeatmapPRED1 shape :{heatmapPRED.shape}")
-
-        # heatmapPRED = heatmapPRED.view(1 , 106, -1)
-        # print(f"HeatmapPRED2 shape :{heatmapPRED.shape}")
-
-        # score = torch.mean(heatmapPRED, dim=-1)[0]
-
-        # score = score.cpu().detach().numpy()
-        # print("Score: ", score)
-
+        heatmapPRED, lmks = model(img_tensor.to(DEVICE))
         scores = mean_topk_activation(heatmapPRED.to('cpu'), topk=3)[0]
-        print("score sahpe111: ", scores.shape)
+        # scores now torch.Size([106, 1, 3])
         scores = scores.view(106, -1)
-
-        print("score sahpe2: ", scores.shape)
-
+        # scores now torch.Size([106, 3])
         scores = torch.mean(scores, dim=-1)
-        print("score sahpe: ", scores.shape)
-
+        # score now torch.Size([106])
         point_occluded = scores < THRESH_OCCLUDED
-        print(point_occluded)
-
-        print(f"HeatmapPRED 3shape :{heatmapPRED.shape}")
-
+        # point_occluded is a bool array of length 106
         lmks = lmks.cpu().detach().numpy()[0]  # 106x2
+        # lmks is shape (106, 2)
         lmks = lmks / 256.0  # Scale into 0-1 coordination
         lmks[:, 0], lmks[:, 1] = lmks[:, 0] * (x2 - x1) + x1, \
                                  lmks[:, 1] * (y2 - y1) + y1
-
         img = draw_landmarks(img, lmks, point_occluded)
         img = cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 1)
+    return img
 
-    cv2.imshow("Image", img)
+
+def load_keypoint_model(checkpoint_path):
+    model = HeatMapLandmarker()
+    if not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(checkpoint_path)
+
+    checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
+    model.load_state_dict(checkpoint['plfd_backbone'])
+    model.to(DEVICE)
+    model.eval()
+    return model
 
 
 def main():
-    from retinaface import RetinaFace
-    detector = RetinaFace(quality="normal")
-    model = HeatMapLandmarker()
-    model_path = "./ckpt/epoch_80.pth.tar"
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    checkpoint = torch.load(model_path, map_location=device)
-    model.load_state_dict(checkpoint['plfd_backbone'])
-    model.to(device)
-    model.eval()
-    ret, img = cap.read()
-    if not ret:
-        print("could not read image, exiting")
+    filepath = "Selfie.jpg"
+    img = cv2.imread(filepath)
+    if not os.path.isfile(filepath):
+        raise FileNotFoundError(filepath)
+    if img is None:
+        print(f"could not read image {filepath}, exiting")
         return
-    img = cv2.resize(img, (1280, 720))
-    apply_to_image(detector, img)
-    cv2.destroyAllWindows()
+    face_detector = RetinaFace(quality="normal")
+    keypoint_model = load_keypoint_model("./ckpt/epoch_80.pth.tar")
+    img = cv2.resize(img, (0, 0), fx=0.2, fy=0.2)
+    img = apply_to_image(face_detector, keypoint_model, img)
+    cv2.imshow("Image", img)
+    k = cv2.waitKey(0)
+    if k == ord("q"):
+        return
 
 
 if __name__ == "__main__":
     main()
+    cv2.destroyAllWindows()
